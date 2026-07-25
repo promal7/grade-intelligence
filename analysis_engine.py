@@ -21,9 +21,24 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-DRIVER_COLS = ["steam_ramp_rate", "filler_step_size", "speed_delta", "moisture_lag_steps"]
+DRIVER_COLS = ["steam_ramp_rate", "filler_step_size", "speed_delta", "moisture_lag_steps",
+               "stock_flow_volatility", "ash_volatility", "caliper_deviation"]
 TARGET_COLS = ["max_deviation_pct", "stabilization_time"]
 SPEC_LIMIT_PCT = 2.5
+
+# Fixed process/recipe limits -- distinct from safe_envelope() below, which is
+# learned from historical data. These represent hard engineering ceilings a
+# recipe management system would enforce regardless of what history shows.
+# ILLUSTRATIVE VALUES: we don't have access to Honeywell's real recipe
+# management system, so these are reasonable placeholders in the same units
+# as the simulated data, not real mill specifications. A production version
+# would read these from the actual recipe database instead of this constant.
+RECIPE_LIMITS = {
+    "steam_ramp_rate": 0.85,
+    "filler_step_size": 8.5,
+    "speed_delta": 6.0,
+    "moisture_lag_steps": 10,
+}
 
 
 def load_data(meta_path="events_meta.csv", ts_path="events_timeseries.csv"):
@@ -126,13 +141,39 @@ def assess_trajectory_risk(partial_ts: pd.DataFrame, bw_target: float,
 
 
 # ---------------------------------------------------------------------------
+# Stabilization-time impact estimate (closes the "reduce stabilization time"
+# requirement -- turns a correlation into an actual predicted number)
+# ---------------------------------------------------------------------------
+def estimate_stabilization_impact(meta: pd.DataFrame, driver: str, current_val: float, target_val: float):
+    """
+    Fits stabilization_time ~ driver across historical events, then reads off
+    the predicted change in stabilization time if this driver moved from
+    current_val to target_val. This is what lets a recommendation say
+    "~N fewer steps to stabilize" instead of just "this driver correlates."
+    """
+    x = meta[driver].values
+    y = meta["stabilization_time"].values
+    slope, intercept, r_value, p_value, _ = stats.linregress(x, y)
+    predicted_current = intercept + slope * current_val
+    predicted_target = intercept + slope * target_val
+    delta = predicted_current - predicted_target  # positive = improvement (fewer steps)
+    return {
+        "delta_steps": round(float(delta), 1),
+        "r2": round(float(r_value ** 2), 3),
+        "p_value": round(float(p_value), 4),
+        "slope": round(float(slope), 4),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Recommendation generation (rationale-tagged, per deliverable #5)
 # ---------------------------------------------------------------------------
 def generate_recommendations(current_drivers: dict, envelope: pd.DataFrame,
-                              correlations: pd.DataFrame, risk: dict):
+                              correlations: pd.DataFrame, risk: dict, meta: pd.DataFrame = None):
     """
     current_drivers: dict like {"steam_ramp_rate": 0.7, "filler_step_size": 6.2, ...}
     Returns a list of recommendation dicts, each tagged with WHY it's being made.
+    meta: full historical dataframe, needed for the stabilization-time delta estimate.
     """
     recs = []
     env_lookup = envelope.set_index("driver").to_dict("index")
@@ -140,24 +181,51 @@ def generate_recommendations(current_drivers: dict, envelope: pd.DataFrame,
     for driver, current_val in current_drivers.items():
         if driver not in env_lookup:
             continue
-        safe_bound = env_lookup[driver]["safe_upper_bound"]
-        if current_val <= safe_bound:
-            continue  # already within safe envelope, no recommendation needed
 
-        # Pull the strongest correlation this driver has to either outcome, for the rationale
-        rel = correlations[correlations["driver"] == driver].iloc[0]
-        confidence = "high" if abs(rel["pearson_r"]) >= 0.5 and rel["pearson_p"] < 0.01 else \
-                     ("medium" if abs(rel["pearson_r"]) >= 0.3 else "low")
+        recipe_limit = RECIPE_LIMITS.get(driver)
+        safe_bound = env_lookup[driver]["safe_upper_bound"]
+
+        # Recipe limit takes priority: a hard-engineering-ceiling breach is a
+        # different (and more certain) kind of finding than a statistical one.
+        if recipe_limit is not None and current_val > recipe_limit:
+            target_val = recipe_limit
+            source = "recipe"
+            confidence = "high"
+            rationale = (f"{driver.replace('_', ' ').title()} of {current_val:.2f} exceeds the fixed "
+                         f"recipe limit of {recipe_limit:.2f} for this loop, independent of what "
+                         f"historical data shows.")
+        elif current_val > safe_bound:
+            target_val = safe_bound
+            source = "historical_correlation"
+            rel = correlations[correlations["driver"] == driver].iloc[0]
+            confidence = "high" if abs(rel["pearson_r"]) >= 0.5 and rel["pearson_p"] < 0.01 else \
+                         ("medium" if abs(rel["pearson_r"]) >= 0.3 else "low")
+            rationale = (f"{driver.replace('_', ' ').title()} correlates with "
+                        f"{rel['target'].replace('_', ' ')} at r={rel['pearson_r']} "
+                        f"(p={rel['pearson_p']}, n={rel['n_events']} historical events).")
+        else:
+            continue  # within both recipe limit and historical safe envelope
+
+        text = (f"Reduce {driver.replace('_', ' ')} from {current_val:.2f} toward {target_val:.2f}")
+        if source == "historical_correlation":
+            text += " (the 75th-percentile value seen in historically successful transitions)."
+        else:
+            text += " (the recipe-defined ceiling for this loop)."
+
+        # Attach the stabilization-time impact estimate whenever we have the
+        # historical data to fit it -- this is what makes "reduce stabilization
+        # time" an actual output instead of an implied side effect.
+        if meta is not None:
+            impact = estimate_stabilization_impact(meta, driver, current_val, target_val)
+            if impact["delta_steps"] > 0.5 and impact["p_value"] < 0.05:
+                text += (f" Estimated to cut stabilization time by ~{impact['delta_steps']} steps "
+                         f"(linear fit, R\u00b2={impact['r2']}, p={impact['p_value']}).")
 
         recs.append({
             "id": f"rec_{driver}",
-            "text": (f"Reduce {driver.replace('_', ' ')} from {current_val:.2f} "
-                     f"toward {safe_bound:.2f} (the 75th-percentile value seen in "
-                     f"historically successful transitions)."),
-            "rationale": (f"{driver.replace('_', ' ').title()} correlates with "
-                          f"{rel['target'].replace('_', ' ')} at r={rel['pearson_r']} "
-                          f"(p={rel['pearson_p']}, n={rel['n_events']} historical events)."),
-            "source_of_inference": "historical_correlation",
+            "text": text,
+            "rationale": rationale,
+            "source_of_inference": source,
             "confidence": confidence,
         })
 
@@ -194,7 +262,7 @@ if __name__ == "__main__":
     print(risk)
 
     current_drivers = {c: sample_meta[c] for c in DRIVER_COLS}
-    recs = generate_recommendations(current_drivers, env, corr, risk)
+    recs = generate_recommendations(current_drivers, env, corr, risk, meta=meta)
     print("\n=== Sample recommendations ===")
     for r in recs:
         print(r)

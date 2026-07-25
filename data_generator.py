@@ -138,6 +138,14 @@ def _simulate_transition(rng, event_id, from_grade, to_grade, aggressiveness):
         "filler_step_size": round(filler_step_size, 3),
         "speed_delta": round(speed_delta, 3),
         "moisture_lag_steps": moisture_lag_steps,
+        # Previously generated but never fed into the analysis engine -- the
+        # problem statement names stock flow / ash / caliper explicitly, so
+        # these three summary features close that gap. Each is a post-ramp
+        # volatility/deviation measure, engineered the same way as the other
+        # drivers above (magnitude of disturbance during the settling phase).
+        "stock_flow_volatility": round(float(np.std(stock_flow[RAMP_END:])), 4),
+        "ash_volatility": round(float(np.std(ash[RAMP_END:])), 4),
+        "caliper_deviation": round(float(np.max(np.abs(caliper[RAMP_END:] - 3.2))), 4),
         "max_deviation_pct": round(max_dev_pct, 3),
         "went_offspec": went_offspec,
         "stabilization_time": stab_idx,

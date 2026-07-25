@@ -129,11 +129,11 @@ with tab1:
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Recommendations")
-    st.caption("Every recommendation is tagged with where it came from -- historical "
-               "correlation or live trajectory extrapolation -- per the rubric requirement.")
+    st.caption("Every recommendation is tagged with where it came from -- a fixed recipe "
+               "limit, a historical correlation, or live trajectory extrapolation.")
 
     current_drivers = {c: event_meta[c] for c in ae.DRIVER_COLS}
-    recs = ae.generate_recommendations(current_drivers, envelope, correlations, risk)
+    recs = ae.generate_recommendations(current_drivers, envelope, correlations, risk, meta=meta)
 
     if not recs:
         st.success("No recommendations -- current setpoints are within the historically safe envelope.")

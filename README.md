@@ -14,18 +14,6 @@ a transition is trending off-spec before it happens, explain why using real
 correlations from historical data, and recommend setpoints that actually fix
 it.
 
-## Why the data is synthetic
-
-I don't have access to real QCS/DCS historian data from an actual mill, so I built
-a generator that simulates 140 grade-change events with the causal structure
-you'd expect in a real mill: pushing steam pressure or filler flow too hard
-during a transition causes more overshoot and a longer settling time, and
-some transitions are simply tuned better than others. I didn't fake a
-uniform "everything correlates" story — a couple of the variables I checked
-(stock flow, ash) come back with essentially no signal in the generated
-data, and the dashboard reports that honestly instead of hiding it. That
-felt more useful than a demo where every number magically lines up.
-
 ## How it's put together
 
 Three pieces, each doing one job:
